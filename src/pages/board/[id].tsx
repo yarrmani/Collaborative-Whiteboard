@@ -1,0 +1,220 @@
+import React, { useEffect, useState, useRef } from 'react';
+import { useRouter } from 'next/router';
+import Head from 'next/head';
+import io, { Socket } from 'socket.io-client';
+import { motion } from 'framer-motion';
+import { v4 as uuidv4 } from 'uuid';
+
+import Topbar from '@/components/Topbar';
+import Sidebar from '@/components/Sidebar';
+import ShareModal from '@/components/ShareModal';
+
+let socket: Socket;
+
+interface Element {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  color?: string;
+  text?: string;
+}
+
+export default function BoardPage() {
+  const router = useRouter();
+  const { id } = router.query;
+  
+  const [boardInfo, setBoardInfo] = useState<any>(null);
+  const [elements, setElements] = useState<Element[]>([]);
+  const [cursors, setCursors] = useState<{ [id: string]: { x: number, y: number, name?: string } }>({});
+  const [activeTool, setActiveTool] = useState('select');
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  const [editRequests, setEditRequests] = useState<any[]>([]);
+
+  // Identify user
+  const userId = useRef<string>('');
+
+  useEffect(() => {
+    if (!id) return;
+
+    userId.current = localStorage.getItem('userId') || uuidv4();
+    localStorage.setItem('userId', userId.current);
+
+    // Bootstrap Board data
+    fetch(`/api/boards/${id}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          alert('Board not found');
+          router.push('/');
+          return;
+        }
+        setBoardInfo(data);
+        setElements(data.elements || []);
+      });
+
+    // Initialize socket connection
+    const initSocket = async () => {
+      await fetch('/api/socket');
+      socket = io({ path: '/api/socket' });
+
+      socket.on('connect', () => {
+        socket.emit('join-board', { boardId: id, userId: userId.current });
+      });
+
+      socket.on('element-updated', (updatedElements: Element[]) => {
+        setElements(updatedElements);
+      });
+
+      socket.on('cursor-update', ({ userId, userName, x, y }) => {
+        setCursors(prev => ({ ...prev, [userId]: { x, y, name: userName } }));
+      });
+
+      socket.on('edit-access-requested', ({ userId: reqUserId, userName }) => {
+        // Simple append if not there
+        setEditRequests(prev => [...prev, { userId: reqUserId, userName }]);
+      });
+    };
+
+    initSocket();
+
+    return () => {
+      if (socket) socket.disconnect();
+    };
+  }, [id, router]);
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (socket) {
+      socket.emit('cursor-move', {
+        boardId: id,
+        userId: userId.current,
+        x: e.clientX,
+        y: e.clientY
+      });
+    }
+  };
+
+  const syncElements = (newElements: Element[]) => {
+    setElements(newElements);
+    if (socket) {
+      socket.emit('element-update', { boardId: id, elements: newElements });
+      socket.emit('save-board', { boardId: id, elements: newElements });
+    }
+  };
+
+  const handleCanvasClick = (e: React.MouseEvent) => {
+    if (activeTool === 'sticky') {
+      const newSticky: Element = {
+        id: uuidv4(),
+        type: 'sticky',
+        x: e.clientX,
+        y: e.clientY,
+        color: ['#fef08a', '#bbf7d0', '#bfdbfe', '#fbcfe8'][Math.floor(Math.random() * 4)],
+        text: 'New Sticky'
+      };
+      syncElements([...elements, newSticky]);
+      setActiveTool('select');
+    }
+    // Handle other tools similarly
+  };
+
+  const updateElementPos = (elId: string, x: number, y: number) => {
+    const newEls = elements.map(el => (el.id === elId ? { ...el, x, y } : el));
+    syncElements(newEls);
+  };
+
+  const updateElementText = (elId: string, text: string) => {
+    const newEls = elements.map(el => (el.id === elId ? { ...el, text } : el));
+    syncElements(newEls);
+  };
+
+  const grantAccess = (reqUserId: string) => {
+    socket.emit('grant-edit-access', { boardId: id, targetUserId: reqUserId });
+    setEditRequests(prev => prev.filter(r => r.userId !== reqUserId));
+  };
+
+  if (!boardInfo) return <div className="min-h-screen bg-slate-50 flex items-center justify-center">Loading plano...</div>;
+
+  return (
+    <div 
+      className="h-screen w-screen bg-slate-50 overflow-hidden relative cursor-crosshair grid-pattern"
+      onPointerMove={handlePointerMove}
+      onClick={handleCanvasClick}
+    >
+      <Head>
+        <title>plano - {id}</title>
+      </Head>
+
+      <Topbar 
+        boardName="Design Thinking Ideation"
+        onShare={() => setIsShareOpen(true)}
+        editors={boardInfo.editors || []}
+      />
+
+      <Sidebar 
+        activeTool={activeTool} 
+        onSelectTool={setActiveTool} 
+      />
+
+      {/* Infinite Canvas Simulation */}
+      <div className="absolute inset-0 z-10 w-full h-full pointer-events-none">
+        
+        {elements.map(el => (
+          <motion.div
+            key={el.id}
+            drag={activeTool === 'select'}
+            dragMomentum={false}
+            onDragEnd={(e, info) => {
+              if (activeTool !== 'select') return;
+              updateElementPos(el.id, el.x + info.offset.x, el.y + info.offset.y);
+            }}
+            initial={{ x: el.x, y: el.y, scale: 0 }}
+            animate={{ x: el.x, y: el.y, scale: 1 }}
+            className="absolute pointer-events-auto"
+            style={{ x: el.x, y: el.y }}
+          >
+            {el.type === 'sticky' && (
+              <div 
+                className="w-48 h-48 rounded shadow-lg p-4 cursor-grab active:cursor-grabbing flex items-center justify-center relative group"
+                style={{ backgroundColor: el.color }}
+              >
+                <textarea 
+                  className="w-full h-full bg-transparent resize-none outline-none text-slate-800 font-medium text-center"
+                  value={el.text}
+                  onChange={(e) => updateElementText(el.id, e.target.value)}
+                />
+              </div>
+            )}
+          </motion.div>
+        ))}
+
+        {/* Remote Cursors */}
+        {Object.entries(cursors).map(([cid, pos]) => (
+          <motion.div
+            key={cid}
+            className="absolute z-50 pointer-events-none"
+            animate={{ x: pos.x, y: pos.y }}
+            transition={{ type: "tween", ease: "linear", duration: 0.05 }}
+          >
+            <svg width="24" height="36" viewBox="0 0 24 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M5.65376 12.3673H5.46026L5.31717 12.4976L0.500002 16.8829L0.500002 1.19841L11.7871 12.3673H5.65376Z" fill="#F97316"/>
+              <path d="M5.65376 12.3673H5.46026L5.31717 12.4976L0.500002 16.8829L0.500002 1.19841L11.7871 12.3673H5.65376Z" stroke="#FFFFFF" strokeWidth="1"/>
+            </svg>
+            <div className="bg-orange-500 text-white text-[10px] px-2 py-0.5 rounded shadow mt-1 whitespace-nowrap ml-4">
+              {pos.name || cid.substring(0,6)}
+            </div>
+          </motion.div>
+        ))}
+      </div>
+
+      <ShareModal 
+        isOpen={isShareOpen}
+        onClose={() => setIsShareOpen(false)}
+        otp={boardInfo.otp}
+        link={typeof window !== 'undefined' ? window.location.href : ''}
+        requests={editRequests}
+        onGrantAccess={grantAccess}
+      />
+    </div>
+  );
+}
