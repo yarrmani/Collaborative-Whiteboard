@@ -4,10 +4,12 @@ import { Undo, Redo, Settings, Search, Share, Download, MessageSquare, Send, Ale
 interface TopbarProps {
   boardName: string;
   onShare: () => void;
-  editors: string[]; // Simplification for avatars
+  editors: string[]; 
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
-export default function Topbar({ boardName, onShare, editors }: TopbarProps) {
+export default function Topbar({ boardName, onShare, editors, onUndo, onRedo }: TopbarProps) {
   return (
     <div className="absolute top-4 left-1/2 -translate-x-1/2 w-[96%] max-w-6xl h-14 bg-white rounded-xl shadow-sm border border-slate-200 flex items-center justify-between px-6 z-50">
       {/* Left section */}
@@ -19,8 +21,8 @@ export default function Topbar({ boardName, onShare, editors }: TopbarProps) {
         <div className="font-medium text-slate-800">{boardName}</div>
         
         <div className="flex items-center gap-3 text-slate-500 ml-4">
-          <button className="hover:text-slate-800 transition-colors"><Undo size={18} /></button>
-          <button className="hover:text-slate-800 transition-colors"><Redo size={18} /></button>
+          <button onClick={onUndo} className="hover:text-slate-800 transition-colors" title="Undo"><Undo size={18} /></button>
+          <button onClick={onRedo} className="hover:text-slate-800 transition-colors" title="Redo"><Redo size={18} /></button>
           <button className="hover:text-slate-800 transition-colors"><Settings size={18} /></button>
           <button className="hover:text-slate-800 transition-colors"><Search size={18} /></button>
         </div>

@@ -22,6 +22,8 @@ interface Element {
   text?: string;
   points?: { x: number, y: number }[];
   url?: string;
+  fontFamily?: string;
+  fontSize?: number;
 }
 
 export default function BoardPage() {
@@ -37,6 +39,16 @@ export default function BoardPage() {
 
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPathId, setCurrentPathId] = useState<string | null>(null);
+
+  const [isDraggingShape, setIsDraggingShape] = useState(false);
+  const [shapeStart, setShapeStart] = useState({ x: 0, y: 0 });
+  const [currentElementId, setCurrentElementId] = useState<string | null>(null);
+
+  const [textFont, setTextFont] = useState('sans');
+  const [textSize, setTextSize] = useState(18);
+
+  const [history, setHistory] = useState<Element[][]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
 
   // Identify user
   const userId = useRef<string>('');
@@ -57,7 +69,10 @@ export default function BoardPage() {
           return;
         }
         setBoardInfo(data);
-        setElements(data.elements || []);
+        const initialElts = data.elements || [];
+        setElements(initialElts);
+        setHistory([initialElts]);
+        setHistoryIndex(0);
       });
 
     // Initialize socket connection
@@ -93,7 +108,7 @@ export default function BoardPage() {
   const handlePointerDown = (e: React.PointerEvent) => {
     // Only place elements if clicking directly on the background, except when drawing
     if (e.target !== e.currentTarget && activeTool !== 'draw') return;
-    if (activeTool === 'select' || activeTool === 'expand' || activeTool === 'upload' || activeTool === 'pipette' || activeTool === 'coffee' || activeTool === 'connect' || activeTool === 'add') return;
+    if (activeTool === 'select' || activeTool === 'expand' || activeTool === 'upload' || activeTool === 'pipette' || activeTool === 'coffee' || activeTool === 'connect' || activeTool === 'add' || activeTool === 'image') return;
 
     const x = e.clientX;
     const y = e.clientY;
@@ -108,32 +123,30 @@ export default function BoardPage() {
       };
       syncElements([...elements, newSticky]);
       setActiveTool('select');
-    } else if (activeTool === 'shape') {
+    } else if (activeTool === 'rectangle' || activeTool === 'circle') {
+      setIsDraggingShape(true);
+      const id = uuidv4();
+      setCurrentElementId(id);
+      setShapeStart({ x, y });
       const newShape: Element = {
-        id: uuidv4(),
-        type: 'shape',
+        id,
+        type: activeTool,
         x, y,
-        width: 120,
-        height: 120,
-        color: '#e2e8f0',
+        width: 0, 
+        height: 0,
+        color: activeTool === 'rectangle' ? '#e2e8f0' : '#dbeafe', 
       };
-      syncElements([...elements, newShape]);
-      setActiveTool('select');
+      setElements(prev => [...prev, newShape]);
     } else if (activeTool === 'text') {
       const newText: Element = {
         id: uuidv4(),
         type: 'text',
         x, y,
-        text: 'Type here...'
+        text: '', 
+        fontFamily: textFont,
+        fontSize: textSize
       };
       syncElements([...elements, newText]);
-      // Keep text tool active or select? Just go to select
-      setActiveTool('select');
-    } else if (activeTool === 'image') {
-      const url = prompt('Enter image URL:');
-      if (url) {
-        syncElements([...elements, { id: uuidv4(), type: 'image', x, y, url }]);
-      }
       setActiveTool('select');
     } else if (activeTool === 'draw') {
       setIsDrawing(true);
@@ -142,6 +155,18 @@ export default function BoardPage() {
       const newPath: Element = { id, type: 'path', x: 0, y: 0, points: [{ x, y }], color: '#000000' };
       setElements(prev => [...prev, newPath]);
     }
+  };
+
+  const handleImageUpload = (dataUrl: string) => {
+    const newImage: Element = {
+      id: uuidv4(),
+      type: 'image',
+      x: window.innerWidth / 2 - 150,
+      y: window.innerHeight / 2 - 150,
+      url: dataUrl
+    };
+    syncElements([...elements, newImage]);
+    setActiveTool('select');
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -162,6 +187,20 @@ export default function BoardPage() {
         return el;
       }));
     }
+
+    if (isDraggingShape && currentElementId && (activeTool === 'rectangle' || activeTool === 'circle')) {
+      const width = Math.abs(e.clientX - shapeStart.x);
+      const height = Math.abs(e.clientY - shapeStart.y);
+      const x = Math.min(e.clientX, shapeStart.x);
+      const y = Math.min(e.clientY, shapeStart.y);
+
+      setElements(prev => prev.map(el => {
+        if (el.id === currentElementId) {
+          return { ...el, x, y, width, height };
+        }
+        return el;
+      }));
+    }
   };
 
   const handlePointerUp = () => {
@@ -170,10 +209,42 @@ export default function BoardPage() {
       setCurrentPathId(null);
       syncElements(elements);
     }
+    if (isDraggingShape) {
+      setIsDraggingShape(false);
+      setCurrentElementId(null);
+      setActiveTool('select');
+      syncElements(elements);
+    }
   };
 
-  const syncElements = (newElements: Element[]) => {
+  const handleUndo = () => {
+    if (historyIndex > 0) {
+      const prevIndex = historyIndex - 1;
+      const prev = history[prevIndex];
+      setHistoryIndex(prevIndex);
+      syncElements(prev, false);
+    }
+  };
+
+  const handleRedo = () => {
+    if (historyIndex > -1 && historyIndex < history.length - 1) {
+      const nextIndex = historyIndex + 1;
+      const next = history[nextIndex];
+      setHistoryIndex(nextIndex);
+      syncElements(next, false);
+    }
+  };
+
+  const syncElements = (newElements: Element[], recordHistory = true) => {
     setElements(newElements);
+    
+    if (recordHistory) {
+      const newHistory = history.slice(0, historyIndex + 1).slice(-50);
+      newHistory.push(newElements);
+      setHistory(newHistory);
+      setHistoryIndex(newHistory.length - 1);
+    }
+
     if (socket) {
       socket.emit('element-update', { boardId: id, elements: newElements });
       socket.emit('save-board', { boardId: id, elements: newElements });
@@ -197,6 +268,15 @@ export default function BoardPage() {
 
   if (!boardInfo) return <div className="min-h-screen bg-slate-50 flex items-center justify-center">Loading plano...</div>;
 
+  const handleSelectTool = (tool: string) => {
+    if (tool === 'clear') {
+      syncElements([]);
+      setActiveTool('select');
+    } else {
+      setActiveTool(tool);
+    }
+  };
+
   return (
     <div 
       className="h-screen w-screen bg-slate-50 overflow-hidden relative cursor-crosshair grid-pattern"
@@ -211,15 +291,32 @@ export default function BoardPage() {
       </Head>
 
       <Topbar 
-        boardName="Design Thinking Ideation"
+        boardName={boardInfo.name || "Design Thinking Ideation"}
         onShare={() => setIsShareOpen(true)}
         editors={boardInfo.editors || []}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
       />
 
       <Sidebar 
         activeTool={activeTool} 
-        onSelectTool={setActiveTool} 
+        onSelectTool={handleSelectTool} 
+        onImageUpload={handleImageUpload}
       />
+
+      {activeTool === 'text' && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-white rounded-lg shadow-md border border-slate-200 p-2 flex gap-4 z-50">
+          <select value={textFont} onChange={e => setTextFont(e.target.value)} className="border border-slate-200 rounded px-2 py-1 text-sm bg-white outline-none cursor-pointer hover:bg-slate-50 transition-colors">
+            <option value="sans">Sans-Serif</option>
+            <option value="serif">Serif</option>
+            <option value="mono">Monospace</option>
+          </select>
+          <div className="flex items-center gap-2 border-l border-slate-200 pl-4">
+            <span className="text-sm font-medium text-slate-500">Size</span>
+            <input type="number" value={textSize} onChange={e => setTextSize(Number(e.target.value))} className="w-16 border border-slate-200 rounded px-2 py-1 text-sm outline-none" min="8" max="120" />
+          </div>
+        </div>
+      )}
 
       {/* Infinite Canvas Simulation */}
       <div className="absolute inset-0 z-10 w-full h-full pointer-events-none">
@@ -251,16 +348,23 @@ export default function BoardPage() {
                 />
               </div>
             )}
-            {el.type === 'shape' && (
+            {el.type === 'rectangle' && (
               <div 
                 className="border-2 border-slate-300 shadow-sm cursor-grab active:cursor-grabbing"
                 style={{ backgroundColor: el.color, width: el.width || 120, height: el.height || 120, borderRadius: '8px' }}
               />
             )}
+            {el.type === 'circle' && (
+              <div 
+                className="border-2 border-slate-300 shadow-sm cursor-grab active:cursor-grabbing rounded-full"
+                style={{ backgroundColor: el.color, width: el.width || 120, height: el.height || 120 }}
+              />
+            )}
             {el.type === 'text' && (
               <div className="cursor-grab active:cursor-grabbing min-w-[120px] p-2 hover:bg-slate-100/50 rounded">
                 <textarea 
-                  className="w-full h-full bg-transparent resize-none outline-none text-slate-800 font-medium text-lg min-h-[40px]"
+                  className={`w-full h-full bg-transparent resize-none outline-none text-slate-800 font-${el.fontFamily || 'sans'} leading-tight`}
+                  style={{ fontSize: el.fontSize || 18, minHeight: '40px' }}
                   value={el.text || ''}
                   onChange={(e) => updateElementText(el.id, e.target.value)}
                   onPointerDown={(e) => e.stopPropagation()}

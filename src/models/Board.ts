@@ -1,144 +1,114 @@
-import dbConnect from '../lib/mssql';
-import sql from 'mssql';
+import { Pool } from 'pg';
 
-export interface BoardElement {
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  width?: number;
-  height?: number;
-  color?: string;
-  text?: string;
-  points?: number[];
-}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || process.env.POSTGRES_URL,
+  ssl: {
+    rejectUnauthorized: false, // Required for secure AWS Neon tech connection via node-postgres
+  },
+});
 
-export interface BoardData {
-  _id: string;
-  otp: string;
-  ownerId: string;
-  editors: string[];
-  elements: BoardElement[];
-  createdAt: Date;
-}
-
-export async function initializeDatabase() {
-  const pool = await dbConnect();
-  await pool.request().query(`
-    IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='Boards' and xtype='U')
-    CREATE TABLE Boards (
-      _id VARCHAR(50) PRIMARY KEY,
-      otp VARCHAR(10) NOT NULL,
-      ownerId VARCHAR(50) NOT NULL,
-      editors NVARCHAR(MAX) NOT NULL,
-      elements NVARCHAR(MAX) NOT NULL,
-      createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-}
-
-export async function createBoard(board: Omit<BoardData, 'createdAt'>): Promise<void> {
-  const pool = await dbConnect();
-  await pool.request()
-    .input('_id', sql.VarChar(50), board._id)
-    .input('otp', sql.VarChar(10), board.otp)
-    .input('ownerId', sql.VarChar(50), board.ownerId)
-    .input('editors', sql.NVarChar(sql.MAX), JSON.stringify(board.editors || []))
-    .input('elements', sql.NVarChar(sql.MAX), JSON.stringify(board.elements || []))
-    .query(`
-      INSERT INTO Boards (_id, otp, ownerId, editors, elements)
-      VALUES (@_id, @otp, @ownerId, @editors, @elements)
-    `);
-}
-
-export async function getBoardById(id: string): Promise<BoardData | null> {
-  const pool = await dbConnect();
-  const result = await pool.request()
-    .input('_id', sql.VarChar(50), id)
-    .query(`
-      SELECT _id, otp, ownerId, editors, elements, createdAt
-      FROM Boards
-      WHERE _id = @_id
-    `);
-
-  if (result.recordset.length === 0) return null;
-  const row = result.recordset[0];
-  
-  // Date logical deletion check: if older than 3 days, delete it and return null
-  const now = new Date();
-  const diffDays = (now.getTime() - new Date(row.createdAt).getTime()) / (1000 * 3600 * 24);
-  if (diffDays >= 3) {
-    await deleteBoardById(id);
-    return null;
+export default class BoardFunctions {
+  /**
+   * Initializes the boards table in Neon Postgres
+   */
+  static async initializeDatabase() {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS boards (
+          id VARCHAR(255) PRIMARY KEY,
+          name VARCHAR(255),
+          passcode VARCHAR(10),
+          owner_id VARCHAR(255),
+          editors TEXT,
+          elements TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      console.log("✅ Neon Postgres: Boards table is ready.");
+    } catch (err) {
+      console.error("❌ Neon Postgres Init Error:", err);
+      // Wait to throw, since it can crash nextjs randomly at startup if just logging
+      // throw err; 
+    }
   }
 
-  return {
-    _id: row._id,
-    otp: row.otp,
-    ownerId: row.ownerId,
-    editors: JSON.parse(row.editors),
-    elements: JSON.parse(row.elements),
-    createdAt: row.createdAt
-  };
+  /**
+   * Cleans up boards older than 3 days
+   */
+  static async lazyCleanupExpiredBoards() {
+    try {
+      await pool.query(`DELETE FROM boards WHERE created_at < NOW() - INTERVAL '3 days';`);
+      console.log("✅ Lazy cleanup executed.");
+    } catch (err) {
+      console.error("❌ Error cleaning up boards:", err);
+    }
+  }
+
+  /**
+   * Creates a new board record
+   */
+  static async createBoard(boardData: { _id: string, otp: string, ownerId: string, editors: string[], elements: any[] }) {
+    try {
+      await pool.query(
+        `INSERT INTO boards (id, name, passcode, owner_id, editors, elements) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [boardData._id, 'Design Thinking Ideation', boardData.otp, boardData.ownerId, JSON.stringify(boardData.editors), JSON.stringify(boardData.elements)]
+      );
+      return boardData._id;
+    } catch (err) {
+      console.error("❌ Error in createBoard:", err);
+      throw err;
+    }
+  }
+
+  /**
+   * Fetches a board by ID
+   */
+  static async getBoardById(id: string) {
+    try {
+      const res = await pool.query(`SELECT * FROM boards WHERE id = $1`, [id]);
+      if (res.rows.length === 0) return null;
+      
+      const row = res.rows[0];
+      return {
+        _id: row.id,
+        name: row.name,
+        otp: row.passcode,
+        ownerId: row.owner_id,
+        editors: JSON.parse(row.editors || '[]'),
+        elements: JSON.parse(row.elements || '[]'),
+        createdAt: row.created_at
+      };
+    } catch (err) {
+      console.error("❌ Error in getBoardById:", err);
+      throw err;
+    }
+  }
+
+  /**
+   * Updates elements (shapes, pencil lines, etc.)
+   */
+  static async updateBoardElements(id: string, elements: any[]) {
+    try {
+      await pool.query(`UPDATE boards SET elements = $1 WHERE id = $2`, [JSON.stringify(elements), id]);
+    } catch (err) {
+      console.error("❌ Error in updateBoardElements:", err);
+      throw err;
+    }
+  }
+
+  /**
+   * Add a new editor granting them permission
+   */
+  static async addEditor(id: string, userId: string) {
+    try {
+        const board = await this.getBoardById(id);
+        if (!board) return;
+        const editors = new Set(board.editors);
+        editors.add(userId);
+        await pool.query(`UPDATE boards SET editors = $1 WHERE id = $2`, [JSON.stringify(Array.from(editors)), id]);
+    } catch (err) {
+      console.error("❌ Error in addEditor:", err);
+      throw err;
+    }
+  }
 }
-
-export async function updateBoardElements(id: string, elements: BoardElement[]): Promise<void> {
-  const pool = await dbConnect();
-  await pool.request()
-    .input('_id', sql.VarChar(50), id)
-    .input('elements', sql.NVarChar(sql.MAX), JSON.stringify(elements))
-    .query(`
-      UPDATE Boards
-      SET elements = @elements
-      WHERE _id = @_id
-    `);
-}
-
-export async function addEditor(id: string, editorId: string): Promise<void> {
-  const board = await getBoardById(id);
-  if (!board) return;
-  
-  const editors = new Set(board.editors);
-  editors.add(editorId);
-  const updatedEditors = Array.from(editors);
-
-  const pool = await dbConnect();
-  await pool.request()
-    .input('_id', sql.VarChar(50), id)
-    .input('editors', sql.NVarChar(sql.MAX), JSON.stringify(updatedEditors))
-    .query(`
-      UPDATE Boards
-      SET editors = @editors
-      WHERE _id = @_id
-    `);
-}
-
-export async function deleteBoardById(id: string): Promise<void> {
-  const pool = await dbConnect();
-  await pool.request()
-    .input('_id', sql.VarChar(50), id)
-    .query(`
-      DELETE FROM Boards
-      WHERE _id = @_id
-    `);
-}
-
-export async function lazyCleanupExpiredBoards(): Promise<void> {
-  const pool = await dbConnect();
-  await pool.request().query(`
-    DELETE FROM Boards
-    WHERE DATEDIFF(day, createdAt, GETDATE()) >= 3
-  `);
-}
-
-const BoardFunctions = {
-  createBoard,
-  getBoardById,
-  updateBoardElements,
-  addEditor,
-  deleteBoardById,
-  initializeDatabase,
-  lazyCleanupExpiredBoards
-};
-
-export default BoardFunctions;
