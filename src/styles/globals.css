@@ -16,3 +16,33 @@ body {
   overflow: hidden;
   background-color: #f8fafc;
 }
+
+canvas {
+  z-index: 50 !important;
+  pointer-events: auto !important;
+  cursor: crosshair;
+}
+
+/* Ensure the background doesn't block the mouse */
+.bg-grid { 
+  pointer-events: none !important; 
+}
+
+/* This forces the drawing layer to be interactive */
+canvas {
+  touch-action: none;
+  user-select: none;
+  pointer-events: auto !important;
+  z-index: 10 !important;
+}
+
+/* This makes sure the background grid doesn't steal your clicks */
+.grid-background, svg.absolute {
+  pointer-events: none !important;
+  z-index: 1;
+}
+
+/* Keep sticky notes clickable but allow drawing around them */
+.sticky-note {
+  z-index: 20 !important;
+}

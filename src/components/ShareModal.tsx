@@ -2,7 +2,7 @@ import React from 'react';
 import { X, Copy } from 'lucide-react';
 
 interface ShareModalProps {
-  isOpen: string;
+  isOpen: boolean;
   otp: string;
   link: string;
   onClose: () => void;

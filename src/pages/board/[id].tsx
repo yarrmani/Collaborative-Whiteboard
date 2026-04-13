@@ -16,8 +16,12 @@ interface Element {
   type: string;
   x: number;
   y: number;
+  width?: number;
+  height?: number;
   color?: string;
   text?: string;
+  points?: { x: number, y: number }[];
+  url?: string;
 }
 
 export default function BoardPage() {
@@ -30,6 +34,9 @@ export default function BoardPage() {
   const [activeTool, setActiveTool] = useState('select');
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [editRequests, setEditRequests] = useState<any[]>([]);
+
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [currentPathId, setCurrentPathId] = useState<string | null>(null);
 
   // Identify user
   const userId = useRef<string>('');
@@ -83,6 +90,60 @@ export default function BoardPage() {
     };
   }, [id, router]);
 
+  const handlePointerDown = (e: React.PointerEvent) => {
+    // Only place elements if clicking directly on the background, except when drawing
+    if (e.target !== e.currentTarget && activeTool !== 'draw') return;
+    if (activeTool === 'select' || activeTool === 'expand' || activeTool === 'upload' || activeTool === 'pipette' || activeTool === 'coffee' || activeTool === 'connect' || activeTool === 'add') return;
+
+    const x = e.clientX;
+    const y = e.clientY;
+
+    if (activeTool === 'sticky') {
+      const newSticky: Element = {
+        id: uuidv4(),
+        type: 'sticky',
+        x, y,
+        color: ['#fef08a', '#bbf7d0', '#bfdbfe', '#fbcfe8'][Math.floor(Math.random() * 4)],
+        text: 'New Sticky'
+      };
+      syncElements([...elements, newSticky]);
+      setActiveTool('select');
+    } else if (activeTool === 'shape') {
+      const newShape: Element = {
+        id: uuidv4(),
+        type: 'shape',
+        x, y,
+        width: 120,
+        height: 120,
+        color: '#e2e8f0',
+      };
+      syncElements([...elements, newShape]);
+      setActiveTool('select');
+    } else if (activeTool === 'text') {
+      const newText: Element = {
+        id: uuidv4(),
+        type: 'text',
+        x, y,
+        text: 'Type here...'
+      };
+      syncElements([...elements, newText]);
+      // Keep text tool active or select? Just go to select
+      setActiveTool('select');
+    } else if (activeTool === 'image') {
+      const url = prompt('Enter image URL:');
+      if (url) {
+        syncElements([...elements, { id: uuidv4(), type: 'image', x, y, url }]);
+      }
+      setActiveTool('select');
+    } else if (activeTool === 'draw') {
+      setIsDrawing(true);
+      const id = uuidv4();
+      setCurrentPathId(id);
+      const newPath: Element = { id, type: 'path', x: 0, y: 0, points: [{ x, y }], color: '#000000' };
+      setElements(prev => [...prev, newPath]);
+    }
+  };
+
   const handlePointerMove = (e: React.PointerEvent) => {
     if (socket) {
       socket.emit('cursor-move', {
@@ -92,6 +153,23 @@ export default function BoardPage() {
         y: e.clientY
       });
     }
+
+    if (isDrawing && currentPathId && activeTool === 'draw') {
+      setElements(prev => prev.map(el => {
+        if (el.id === currentPathId && el.points) {
+          return { ...el, points: [...el.points, { x: e.clientX, y: e.clientY }] };
+        }
+        return el;
+      }));
+    }
+  };
+
+  const handlePointerUp = () => {
+    if (isDrawing) {
+      setIsDrawing(false);
+      setCurrentPathId(null);
+      syncElements(elements);
+    }
   };
 
   const syncElements = (newElements: Element[]) => {
@@ -100,22 +178,6 @@ export default function BoardPage() {
       socket.emit('element-update', { boardId: id, elements: newElements });
       socket.emit('save-board', { boardId: id, elements: newElements });
     }
-  };
-
-  const handleCanvasClick = (e: React.MouseEvent) => {
-    if (activeTool === 'sticky') {
-      const newSticky: Element = {
-        id: uuidv4(),
-        type: 'sticky',
-        x: e.clientX,
-        y: e.clientY,
-        color: ['#fef08a', '#bbf7d0', '#bfdbfe', '#fbcfe8'][Math.floor(Math.random() * 4)],
-        text: 'New Sticky'
-      };
-      syncElements([...elements, newSticky]);
-      setActiveTool('select');
-    }
-    // Handle other tools similarly
   };
 
   const updateElementPos = (elId: string, x: number, y: number) => {
@@ -138,8 +200,11 @@ export default function BoardPage() {
   return (
     <div 
       className="h-screen w-screen bg-slate-50 overflow-hidden relative cursor-crosshair grid-pattern"
+      onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
-      onClick={handleCanvasClick}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onPointerLeave={handlePointerUp}
     >
       <Head>
         <title>plano - {id}</title>
@@ -162,7 +227,7 @@ export default function BoardPage() {
         {elements.map(el => (
           <motion.div
             key={el.id}
-            drag={activeTool === 'select'}
+            drag={activeTool === 'select' && el.type !== 'path'}
             dragMomentum={false}
             onDragEnd={(e, info) => {
               if (activeTool !== 'select') return;
@@ -170,7 +235,7 @@ export default function BoardPage() {
             }}
             initial={{ x: el.x, y: el.y, scale: 0 }}
             animate={{ x: el.x, y: el.y, scale: 1 }}
-            className="absolute pointer-events-auto"
+            className={`absolute ${el.type === 'path' ? 'pointer-events-none' : 'pointer-events-auto'}`}
             style={{ x: el.x, y: el.y }}
           >
             {el.type === 'sticky' && (
@@ -182,8 +247,47 @@ export default function BoardPage() {
                   className="w-full h-full bg-transparent resize-none outline-none text-slate-800 font-medium text-center"
                   value={el.text}
                   onChange={(e) => updateElementText(el.id, e.target.value)}
+                  onPointerDown={(e) => e.stopPropagation()}
                 />
               </div>
+            )}
+            {el.type === 'shape' && (
+              <div 
+                className="border-2 border-slate-300 shadow-sm cursor-grab active:cursor-grabbing"
+                style={{ backgroundColor: el.color, width: el.width || 120, height: el.height || 120, borderRadius: '8px' }}
+              />
+            )}
+            {el.type === 'text' && (
+              <div className="cursor-grab active:cursor-grabbing min-w-[120px] p-2 hover:bg-slate-100/50 rounded">
+                <textarea 
+                  className="w-full h-full bg-transparent resize-none outline-none text-slate-800 font-medium text-lg min-h-[40px]"
+                  value={el.text || ''}
+                  onChange={(e) => updateElementText(el.id, e.target.value)}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  placeholder="Type here..."
+                />
+              </div>
+            )}
+            {el.type === 'image' && el.url && (
+              <div className="cursor-grab active:cursor-grabbing p-1 bg-white shadow-sm border border-slate-200 rounded">
+                <img 
+                  src={el.url} 
+                  alt="Board Image" 
+                  className="max-w-[400px] max-h-[400px] object-contain rounded pointer-events-none" 
+                />
+              </div>
+            )}
+            {el.type === 'path' && el.points && el.points.length > 0 && (
+              <svg className="absolute top-0 left-0 overflow-visible pointer-events-none">
+                <path 
+                  d={`M ${el.points.map(p => `${p.x} ${p.y}`).join(' L ')}`} 
+                  stroke={el.color || '#000000'} 
+                  strokeWidth="4" 
+                  fill="none" 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                />
+              </svg>
             )}
           </motion.div>
         ))}
